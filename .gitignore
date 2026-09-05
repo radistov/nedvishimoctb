@@ -1,0 +1,33 @@
+// .gitignore
+// Защищает репозиторий от случайной публикации секретов и локальных файлов.
+
+.env
+.env.*
+!.env.example
+
+/target/
+
+.idea/
+.vscode/
+
+*.log
+logs/
+
+.DS_Store
+Thumbs.db
+
+*.tmp
+*.temp
+*.swp
+*.swo
+
+data/
+uploads/
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+*.local
