@@ -1,14 +1,11 @@
-// src/bot/handlers.rs
-
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use teloxide::{
     dispatching::dialogue::GetChatId,
     prelude::*,
     types::{
-        CallbackQuery, ChatId, InputFile, KeyboardRemove, Message,
+        CallbackQuery, ChatId, InputFile, KeyboardRemove, Message, ParseMode,
     },
 };
 
@@ -16,33 +13,14 @@ use uuid::Uuid;
 
 use crate::{
     bot::{
-        keyboards::{
-            budget_keyboard,
-            city_keyboard,
-            district_keyboard,
-            favorites_keyboard,
-            main_menu,
-            property_keyboard,
-            request_phone,
-            rooms_keyboard,
-        },
-        HandlerResult,
-        MyDialogue,
+        keyboards,
+        mod_::{HandlerResult, MyDialogue},
     },
     db::operations,
-    models::{
-        Command,
-        Favorite,
-        RegistrationState,
-        RequestStatus,
-        User,
-        UserProfile,
-        ViewingRequest,
-    },
+    models::{Command, RegistrationState},
     AppState,
 };
 
-/// Обрабатывает команды Telegram.
 pub async fn command_handler(
     bot: Bot,
     dialogue: MyDialogue,
@@ -50,592 +28,331 @@ pub async fn command_handler(
     command: Command,
     state: Arc<AppState>,
 ) -> HandlerResult {
-    let user = message
-        .from
-        .as_ref()
-        .context("У сообщения отсутствует пользователь")?;
-
     match command {
-        Command::Start => {
-            start(
-                bot,
-                dialogue,
-                message,
-                user.id.0 as i64,
-                state,
-            )
-            .await?;
-        }
-
-        Command::Profile => {
-            show_profile(
-                bot,
-                message,
-                user.id.0 as i64,
-                state,
-            )
-            .await?;
-        }
-
-        Command::Search => {
-            start_search(
-                bot,
-                dialogue,
-                message,
-                user.id.0 as i64,
-                state,
-            )
-            .await?;
-        }
-
-        Command::Favorites => {
-            show_favorites(
-                bot,
-                message,
-                user.id.0 as i64,
-                state,
-            )
-            .await?;
-        }
-
-        Command::Help => {
-            show_help(bot, message).await?;
-        }
+        Command::Start => start(bot, dialogue, message, state).await?,
+        Command::Profile => show_profile(bot, message, state).await?,
+        Command::Search => start_search(bot, dialogue, message, state).await?,
+        Command::Favorites => show_favorites(bot, message, state).await?,
+        Command::Help => show_help(bot, message).await?,
     }
 
     Ok(())
 }
 
-/// Обрабатывает обычные текстовые сообщения.
 pub async fn message_handler(
     bot: Bot,
     dialogue: MyDialogue,
     message: Message,
     state: Arc<AppState>,
 ) -> HandlerResult {
-    let text = match message.text() {
-        Some(text) => text.trim(),
-        None => return Ok(()),
-    };
-
-    let telegram_id = message
-        .from
-        .as_ref()
-        .map(|user| user.id.0 as i64)
-        .context("Не удалось определить Telegram ID")?;
+    let text = message.text().unwrap_or_default();
 
     match text {
         "🏠 Подобрать недвижимость" => {
-            start_search(
-                bot,
-                dialogue,
-                message,
-                telegram_id,
-                state,
-            )
-            .await?;
+            start_search(bot, dialogue, message, state).await?
         }
-
-        "⭐ Избранное" => {
-            show_favorites(
-                bot,
-                message,
-                telegram_id,
-                state,
-            )
-            .await?;
-        }
-
-        "👤 Профиль" => {
-            show_profile(
-                bot,
-                message,
-                telegram_id,
-                state,
-            )
-            .await?;
-        }
-
-        "ℹ Помощь" => {
-            show_help(bot, message).await?;
-        }
-
-        _ => {
-            handle_dialogue_message(
-                bot,
-                dialogue,
-                message,
-                state,
-            )
-            .await?;
-        }
+        "⭐ Избранное" => show_favorites(bot, message, state).await?,
+        "👤 Профиль" => show_profile(bot, message, state).await?,
+        "ℹ️ Помощь" => show_help(bot, message).await?,
+        _ => handle_dialogue_message(bot, dialogue, message, state).await?,
     }
 
     Ok(())
 }
 
-/// Обрабатывает callback-кнопки.
 pub async fn callback_handler(
     bot: Bot,
     dialogue: MyDialogue,
     query: CallbackQuery,
     state: Arc<AppState>,
 ) -> HandlerResult {
-    let data = match query.data.as_deref() {
-        Some(data) => data.to_owned(),
-        None => return Ok(()),
+    let Some(data) = query.data.as_deref() else {
+        return Ok(());
     };
 
-    let user_id = query.from.id.0 as i64;
+    bot.answer_callback_query(query.id.clone()).await?;
 
-    bot.answer_callback_query(query.id.clone())
-        .await
-        .ok();
+    let Some(message) = query.message.as_ref() else {
+        return Ok(());
+    };
+
+    let chat_id = message.chat().id;
 
     if let Some(value) = data.strip_prefix("city:") {
-        dialogue
-            .update(RegistrationState::WaitingDistrict)
-            .await?;
-
-        if let Some(profile) = get_or_create_profile(
-            &state,
-            user_id,
-            query.from.first_name.clone(),
-            query.from.username.clone(),
-        )
-        .await?
-        {
-            let mut profile = profile;
-            profile.city = Some(value.to_owned());
-
-            operations::update_profile(
-                &state.db,
-                &profile,
-            )
-            .await?;
-
-            if let Some(message) = query.message.as_ref() {
-                bot.edit_message_text(
-                    message.chat().id,
-                    message.id(),
-                    "📍 Отлично. Теперь выберите район:",
-                )
-                .reply_markup(district_keyboard())
-                .await?;
-            }
-        }
-
-        return Ok(());
-    }
-
-    if let Some(value) = data.strip_prefix("district:") {
-        dialogue
-            .update(RegistrationState::WaitingBudget)
-            .await?;
-
-        let profile = get_profile_for_user(
-            &state,
-            user_id,
+        handle_city(
+            bot,
+            dialogue,
+            chat_id,
+            value.to_owned(),
+            state,
         )
         .await?;
-
-        let mut profile = profile
-            .context("Профиль пользователя не найден")?;
-
-        profile.district = Some(value.to_owned());
-
-        operations::update_profile(
-            &state.db,
-            &profile,
+    } else if let Some(value) = data.strip_prefix("district:") {
+        handle_district(
+            bot,
+            dialogue,
+            chat_id,
+            value.to_owned(),
+            state,
         )
         .await?;
-
-        if let Some(message) = query.message.as_ref() {
-            bot.edit_message_text(
-                message.chat().id,
-                message.id(),
-                "💰 Какой максимальный бюджет?",
-            )
-            .reply_markup(budget_keyboard())
-            .await?;
-        }
-
-        return Ok(());
-    }
-
-    if let Some(value) = data.strip_prefix("budget:") {
-        let budget = value
-            .parse::<i64>()
-            .context("Некорректное значение бюджета")?;
-
-        dialogue
-            .update(RegistrationState::WaitingRooms)
-            .await?;
-
-        let profile = get_profile_for_user(
-            &state,
-            user_id,
+    } else if let Some(value) = data.strip_prefix("budget:") {
+        handle_budget(
+            bot,
+            dialogue,
+            chat_id,
+            value,
+            state,
         )
         .await?;
-
-        let mut profile = profile
-            .context("Профиль пользователя не найден")?;
-
-        profile.budget = Some(budget);
-
-        operations::update_profile(
-            &state.db,
-            &profile,
+    } else if let Some(value) = data.strip_prefix("rooms:") {
+        handle_rooms(
+            bot,
+            dialogue,
+            chat_id,
+            value,
+            state,
         )
         .await?;
-
-        if let Some(message) = query.message.as_ref() {
-            bot.edit_message_text(
-                message.chat().id,
-                message.id(),
-                "🛏 Сколько комнат вам нужно?",
-            )
-            .reply_markup(rooms_keyboard())
-            .await?;
-        }
-
-        return Ok(());
-    }
-
-    if let Some(value) = data.strip_prefix("rooms:") {
-        let rooms = value
-            .parse::<i32>()
-            .context("Некорректное количество комнат")?;
-
-        dialogue
-            .update(RegistrationState::WaitingAdditionalRequirements)
-            .await?;
-
-        let profile = get_profile_for_user(
-            &state,
-            user_id,
+    } else if let Some(value) = data.strip_prefix("favorite:") {
+        add_favorite(
+            bot,
+            chat_id,
+            value,
+            state,
         )
         .await?;
-
-        let mut profile = profile
-            .context("Профиль пользователя не найден")?;
-
-        profile.rooms = Some(rooms);
-
-        operations::update_profile(
-            &state.db,
-            &profile,
-        )
-        .await?;
-
-        if let Some(message) = query.message.as_ref() {
-            bot.edit_message_text(
-                message.chat().id,
-                message.id(),
-                "📝 Напишите дополнительные требования.\n\n\
-                 Например: метро рядом, балкон, ремонт.\n\n\
-                 Если дополнительных требований нет, напишите «нет».",
-            )
-            .await?;
-        }
-
-        return Ok(());
-    }
-
-    if let Some(property_id) = data.strip_prefix("favorite:") {
-        let property_id = Uuid::parse_str(property_id)
-            .context("Некорректный ID объекта")?;
-
-        let user = get_user(
-            &state,
-            user_id,
-        )
-        .await?
-        .context("Пользователь не найден")?;
-
-        let favorite = Favorite {
-            id: Uuid::new_v4(),
-            user_id: user.id,
-            property_id,
-            created_at: Utc::now(),
-        };
-
-        operations::add_to_favorites(
-            &state.db,
-            &favorite,
-        )
-        .await?;
-
-        if let Some(message) = query.message.as_ref() {
-            bot.answer_callback_query(query.id)
-                .text("⭐ Объект добавлен в избранное")
-                .show_alert(false)
-                .await
-                .ok();
-
-            bot.edit_message_reply_markup(
-                message.chat().id,
-                message.id(),
-            )
-            .reply_markup(property_keyboard(&property_id.to_string()))
-            .await
-            .ok();
-        }
-
-        return Ok(());
-    }
-
-    if let Some(property_id) =
-        data.strip_prefix("favorite_remove:")
-    {
-        let property_id = Uuid::parse_str(property_id)
-            .context("Некорректный ID объекта")?;
-
-        let user = get_user(
-            &state,
-            user_id,
-        )
-        .await?
-        .context("Пользователь не найден")?;
-
+    } else if let Some(value) = data.strip_prefix("favorite_remove:") {
         remove_favorite(
-            &state,
-            user.id,
-            property_id,
+            bot,
+            chat_id,
+            value,
+            state,
         )
         .await?;
-
-        if let Some(message) = query.message.as_ref() {
-            bot.edit_message_text(
-                message.chat().id,
-                message.id(),
-                "🗑 Объект удалён из избранного.",
-            )
-            .await?;
-        }
-
-        return Ok(());
-    }
-
-    if let Some(property_id) = data.strip_prefix("view:") {
-        let property_id = Uuid::parse_str(property_id)
-            .context("Некорректный ID объекта")?;
-
+    } else if let Some(value) = data.strip_prefix("view:") {
         create_viewing_request(
             bot,
-            query.message.as_ref(),
-            user_id,
-            property_id,
+            chat_id,
+            value,
             state,
         )
         .await?;
-
-        return Ok(());
-    }
-
-    if let Some(property_id) = data.strip_prefix("next:") {
-        let property_id = Uuid::parse_str(property_id)
-            .context("Некорректный ID объекта")?;
-
+    } else if let Some(value) = data.strip_prefix("next:") {
         show_next_property(
             bot,
-            query.message.as_ref(),
-            user_id,
-            property_id,
+            chat_id,
+            value,
             state,
         )
         .await?;
-
-        return Ok(());
     }
 
     Ok(())
 }
 
-/// Обработка состояний FSM.
-async fn handle_dialogue_message(
-    bot: Bot,
-    dialogue: MyDialogue,
-    message: Message,
-    state: Arc<AppState>,
-) -> HandlerResult {
-    let current_state = dialogue.get().await?;
-
-    match current_state {
-        Some(RegistrationState::WaitingPhone) => {
-            handle_phone(
-                bot,
-                dialogue,
-                message,
-                state,
-            )
-            .await?;
-        }
-
-        Some(RegistrationState::WaitingAdditionalRequirements) => {
-            handle_additional_requirements(
-                bot,
-                dialogue,
-                message,
-                state,
-            )
-            .await?;
-        }
-
-        Some(RegistrationState::Completed) => {
-            bot.send_message(
-                message.chat.id,
-                "Анкета уже заполнена. Используйте /search для нового поиска.",
-            )
-            .reply_markup(main_menu())
-            .await?;
-        }
-
-        _ => {
-            bot.send_message(
-                message.chat.id,
-                "Используйте меню или команду /start.",
-            )
-            .reply_markup(main_menu())
-            .await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Запускает регистрацию пользователя.
 async fn start(
     bot: Bot,
     dialogue: MyDialogue,
     message: Message,
-    telegram_id: i64,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let tg_user = message
-        .from
-        .as_ref()
-        .context("Пользователь отсутствует")?;
+) -> Result<()> {
+    let Some(user) = message.from.as_ref() else {
+        return Ok(());
+    };
 
-    let existing_user =
-        operations::get_user_by_telegram_id(
-            &state.db,
-            telegram_id,
-        )
-        .await?;
+    let telegram_id = user.id.0 as i64;
 
-    if existing_user.is_none() {
-        let user = User {
-            id: Uuid::new_v4(),
-            telegram_id,
-            username: tg_user.username.clone(),
-            first_name: tg_user.first_name.clone(),
-            last_name: tg_user.last_name.clone(),
-            phone: None,
-            created_at: Utc::now(),
-        };
+    let db_user = match operations::get_user_by_telegram_id(
+        &state.db,
+        telegram_id,
+    )
+    .await?
+    {
+        Some(user) => user,
+        None => {
+            operations::create_user(
+                &state.db,
+                telegram_id,
+                user.username.as_deref(),
+                &user.first_name,
+                user.last_name.as_deref(),
+            )
+            .await?
+        }
+    };
 
-        operations::create_user(
-            &state.db,
-            &user,
-        )
-        .await?;
+    if operations::get_profile(&state.db, db_user.id)
+        .await?
+        .is_none()
+    {
+        operations::create_profile(&state.db, db_user.id).await?;
+    }
 
-        let profile = UserProfile {
-            id: Uuid::new_v4(),
-            user_id: user.id,
-            city: None,
-            district: None,
-            budget: None,
-            rooms: None,
-            additional_requirements: None,
-        };
-
-        operations::create_profile(
-            &state.db,
-            &profile,
-        )
-        .await?;
-
+    if db_user.phone.is_none() {
         dialogue
             .update(RegistrationState::WaitingPhone)
             .await?;
 
         bot.send_message(
             message.chat.id,
-            format!(
-                "👋 Привет, {}!\n\n\
-                 Добро пожаловать в сервис подбора недвижимости.\n\n\
-                 Для начала отправьте свой номер телефона.",
-                tg_user.first_name
-            ),
+            "Здравствуйте! 👋\n\nДля начала отправьте номер телефона.",
         )
-        .reply_markup(request_phone())
+        .reply_markup(keyboards::request_phone())
+        .await?;
+    } else {
+        dialogue
+            .update(RegistrationState::Completed)
+            .await?;
+
+        bot.send_message(
+            message.chat.id,
+            "С возвращением! 👋\n\nВыберите нужное действие:",
+        )
+        .reply_markup(keyboards::main_menu())
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn start_search(
+    bot: Bot,
+    dialogue: MyDialogue,
+    message: Message,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let Some(user) = get_user(&state, &message).await? else {
+        bot.send_message(
+            message.chat.id,
+            "Сначала выполните команду /start.",
+        )
+        .await?;
+
+        return Ok(());
+    };
+
+    if user.phone.is_none() {
+        dialogue
+            .update(RegistrationState::WaitingPhone)
+            .await?;
+
+        bot.send_message(
+            message.chat.id,
+            "Перед поиском необходимо указать номер телефона.",
+        )
+        .reply_markup(keyboards::request_phone())
         .await?;
 
         return Ok(());
     }
 
+    get_or_create_profile(&state, user.id).await?;
+
     dialogue
-        .update(RegistrationState::Completed)
+        .update(RegistrationState::WaitingCity)
         .await?;
 
     bot.send_message(
         message.chat.id,
-        "👋 С возвращением!\n\nВыберите нужное действие:",
+        "🏙 Выберите город:",
     )
-    .reply_markup(main_menu())
+    .reply_markup(keyboards::city_keyboard())
     .await?;
 
     Ok(())
 }
 
-/// Обрабатывает номер телефона.
+async fn handle_dialogue_message(
+    bot: Bot,
+    dialogue: MyDialogue,
+    message: Message,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let current_state = dialogue.get().await?.unwrap_or_default();
+
+    match current_state {
+        RegistrationState::WaitingPhone => {
+            handle_phone(bot, dialogue, message, state).await?
+        }
+        RegistrationState::WaitingAdditionalRequirements => {
+            handle_additional_requirements(
+                bot,
+                dialogue,
+                message,
+                state,
+            )
+            .await?
+        }
+        RegistrationState::Completed => {
+            bot.send_message(
+                message.chat.id,
+                "Используйте кнопки меню или команды /search, /profile, /favorites.",
+            )
+            .reply_markup(keyboards::main_menu())
+            .await?;
+        }
+        _ => {
+            bot.send_message(
+                message.chat.id,
+                "Пожалуйста, выберите вариант с помощью кнопок.",
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_phone(
     bot: Bot,
     dialogue: MyDialogue,
     message: Message,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let telegram_id = message
-        .from
-        .as_ref()
-        .context("Пользователь отсутствует")?
-        .id
-        .0 as i64;
+) -> Result<()> {
+    let Some(from) = message.from.as_ref() else {
+        return Ok(());
+    };
 
     let phone = if let Some(contact) = message.contact() {
         contact.phone_number.clone()
     } else if let Some(text) = message.text() {
         text.trim().to_owned()
     } else {
+        String::new()
+    };
+
+    if phone.is_empty() {
         bot.send_message(
             message.chat.id,
-            "Пожалуйста, отправьте номер телефона.",
+            "Не удалось получить номер. Отправьте его через кнопку ниже.",
         )
-        .reply_markup(request_phone())
+        .reply_markup(keyboards::request_phone())
+        .await?;
+
+        return Ok(());
+    }
+
+    let Some(user) = operations::get_user_by_telegram_id(
+        &state.db,
+        from.id.0 as i64,
+    )
+    .await?
+    else {
+        bot.send_message(
+            message.chat.id,
+            "Пользователь не найден. Выполните /start.",
+        )
         .await?;
 
         return Ok(());
     };
 
-    let user = operations::get_user_by_telegram_id(
+    operations::update_user_phone(
         &state.db,
-        telegram_id,
+        user.id,
+        &phone,
     )
-    .await?
-    .context("Пользователь не найден")?;
-
-    sqlx::query(
-        r#"
-        UPDATE users
-        SET phone = $2
-        WHERE id = $1
-        "#,
-    )
-    .bind(user.id)
-    .bind(&phone)
-    .execute(&state.db)
     .await?;
 
     dialogue
@@ -644,104 +361,213 @@ async fn handle_phone(
 
     bot.send_message(
         message.chat.id,
-        "🏙 Теперь выберите город:",
+        "Телефон сохранён ✅\n\nТеперь выберите город:",
     )
     .reply_markup(KeyboardRemove::new())
     .await?;
 
     bot.send_message(
         message.chat.id,
-        "Выберите город:",
+        "🏙 Город:",
     )
-    .reply_markup(city_keyboard())
+    .reply_markup(keyboards::city_keyboard())
     .await?;
 
     Ok(())
 }
 
-/// Запускает новый поиск недвижимости.
-async fn start_search(
+async fn handle_city(
     bot: Bot,
     dialogue: MyDialogue,
-    message: Message,
-    telegram_id: i64,
+    chat_id: ChatId,
+    city: String,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let user = get_user(
-        &state,
-        telegram_id,
+) -> Result<()> {
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
+    };
+
+    let profile = get_or_create_profile(&state, user.id).await?;
+
+    operations::update_profile(
+        &state.db,
+        user.id,
+        Some(&city),
+        profile.district.as_deref(),
+        profile.budget,
+        profile.rooms,
+        profile.additional_requirements.as_deref(),
     )
     .await?;
 
-    if user.is_none() {
-        bot.send_message(
-            message.chat.id,
-            "Сначала зарегистрируйтесь через /start.",
-        )
-        .await?;
-
-        return Ok(());
-    }
-
     dialogue
-        .update(RegistrationState::WaitingCity)
+        .update(RegistrationState::WaitingDistrict)
         .await?;
 
     bot.send_message(
-        message.chat.id,
-        "🏙 Выберите город для поиска:",
+        chat_id,
+        format!("Город: {city} ✅\n\nВыберите район:"),
     )
-    .reply_markup(city_keyboard())
+    .reply_markup(keyboards::district_keyboard())
     .await?;
 
     Ok(())
 }
 
-/// Обрабатывает дополнительные требования.
+async fn handle_district(
+    bot: Bot,
+    dialogue: MyDialogue,
+    chat_id: ChatId,
+    district: String,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
+    };
+
+    let profile = get_or_create_profile(&state, user.id).await?;
+
+    operations::update_profile(
+        &state.db,
+        user.id,
+        profile.city.as_deref(),
+        Some(&district),
+        profile.budget,
+        profile.rooms,
+        profile.additional_requirements.as_deref(),
+    )
+    .await?;
+
+    dialogue
+        .update(RegistrationState::WaitingBudget)
+        .await?;
+
+    bot.send_message(
+        chat_id,
+        format!("Район: {district} ✅\n\nВыберите максимальный бюджет:"),
+    )
+    .reply_markup(keyboards::budget_keyboard())
+    .await?;
+
+    Ok(())
+}
+
+async fn handle_budget(
+    bot: Bot,
+    dialogue: MyDialogue,
+    chat_id: ChatId,
+    value: &str,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let budget = value
+        .parse::<i64>()
+        .context("Некорректный бюджет")?;
+
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
+    };
+
+    let profile = get_or_create_profile(&state, user.id).await?;
+
+    operations::update_profile(
+        &state.db,
+        user.id,
+        profile.city.as_deref(),
+        profile.district.as_deref(),
+        Some(budget),
+        profile.rooms,
+        profile.additional_requirements.as_deref(),
+    )
+    .await?;
+
+    dialogue
+        .update(RegistrationState::WaitingRooms)
+        .await?;
+
+    bot.send_message(
+        chat_id,
+        format!(
+            "Бюджет до {} ₽ ✅\n\nСколько комнат нужно?",
+            format_price(budget)
+        ),
+    )
+    .reply_markup(keyboards::rooms_keyboard())
+    .await?;
+
+    Ok(())
+}
+
+async fn handle_rooms(
+    bot: Bot,
+    dialogue: MyDialogue,
+    chat_id: ChatId,
+    value: &str,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let rooms = value
+        .parse::<i32>()
+        .context("Некорректное количество комнат")?;
+
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
+    };
+
+    let profile = get_or_create_profile(&state, user.id).await?;
+
+    operations::update_profile(
+        &state.db,
+        user.id,
+        profile.city.as_deref(),
+        profile.district.as_deref(),
+        profile.budget,
+        Some(rooms),
+        profile.additional_requirements.as_deref(),
+    )
+    .await?;
+
+    dialogue
+        .update(RegistrationState::WaitingAdditionalRequirements)
+        .await?;
+
+    bot.send_message(
+        chat_id,
+        "Есть дополнительные пожелания?\n\nНапишите их сообщением или отправьте «нет».",
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn handle_additional_requirements(
     bot: Bot,
     dialogue: MyDialogue,
     message: Message,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let telegram_id = message
-        .from
-        .as_ref()
-        .context("Пользователь отсутствует")?
-        .id
-        .0 as i64;
+) -> Result<()> {
+    let Some(user) = get_user(&state, &message).await? else {
+        return Ok(());
+    };
 
-    let text = message
-        .text()
-        .unwrap_or("нет")
-        .trim();
+    let text = message.text().unwrap_or_default().trim();
 
-    let user = get_user(
-        &state,
-        telegram_id,
-    )
-    .await?
-    .context("Пользователь не найден")?;
+    let requirements = if text.eq_ignore_ascii_case("нет") {
+        None
+    } else if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    };
 
-    let profile = operations::get_profile(
-        &state.db,
-        user.id,
-    )
-    .await?
-    .context("Профиль пользователя не найден")?;
-
-    let mut profile = profile;
-
-    profile.additional_requirements =
-        if text.eq_ignore_ascii_case("нет") {
-            None
-        } else {
-            Some(text.to_owned())
-        };
+    let profile = get_or_create_profile(&state, user.id).await?;
 
     operations::update_profile(
         &state.db,
-        &profile,
+        user.id,
+        profile.city.as_deref(),
+        profile.district.as_deref(),
+        profile.budget,
+        profile.rooms,
+        requirements,
     )
     .await?;
 
@@ -751,51 +577,48 @@ async fn handle_additional_requirements(
 
     bot.send_message(
         message.chat.id,
-        "✅ Параметры сохранены!\n\nИщу подходящие варианты...",
+        "Ищу подходящие варианты... 🔎",
     )
-    .reply_markup(main_menu())
     .await?;
 
     search_and_show_first(
-        bot,
+        &bot,
         message.chat.id,
         user.id,
-        state,
+        &state,
     )
     .await?;
 
     Ok(())
 }
 
-/// Выполняет поиск и показывает первый объект.
 async fn search_and_show_first(
-    bot: Bot,
+    bot: &Bot,
     chat_id: ChatId,
     user_id: Uuid,
-    state: Arc<AppState>,
-) -> HandlerResult {
-    let profile = operations::get_profile(
-        &state.db,
-        user_id,
-    )
-    .await?
-    .context("Профиль пользователя не найден")?;
+    state: &Arc<AppState>,
+) -> Result<()> {
+    let Some(profile) = operations::get_profile(&state.db, user_id).await? else {
+        bot.send_message(chat_id, "Профиль ещё не заполнен.")
+            .await?;
 
-    let city = profile
-        .city
-        .context("Город не указан")?;
+        return Ok(());
+    };
 
-    let district = profile
-        .district
-        .context("Район не указан")?;
+    let (Some(city), Some(district), Some(budget), Some(rooms)) = (
+        profile.city,
+        profile.district,
+        profile.budget,
+        profile.rooms,
+    ) else {
+        bot.send_message(
+            chat_id,
+            "Не удалось определить все параметры поиска.",
+        )
+        .await?;
 
-    let budget = profile
-        .budget
-        .context("Бюджет не указан")?;
-
-    let rooms = profile
-        .rooms
-        .context("Количество комнат не указано")?;
+        return Ok(());
+    };
 
     let properties = operations::search_properties(
         &state.db,
@@ -809,129 +632,48 @@ async fn search_and_show_first(
     if properties.is_empty() {
         bot.send_message(
             chat_id,
-            "😔 По вашим параметрам ничего не найдено.\n\n\
-             Попробуйте изменить район, бюджет или количество комнат.",
+            "К сожалению, подходящих вариантов пока нет. 😔\n\nПопробуйте изменить параметры поиска.",
         )
+        .reply_markup(keyboards::main_menu())
         .await?;
 
         return Ok(());
     }
 
-    let property = &properties[0];
-
     send_property_card(
-        &bot,
+        bot,
         chat_id,
-        property,
+        &properties[0],
     )
     .await?;
 
     Ok(())
 }
 
-/// Показывает карточку объекта.
-async fn send_property_card(
-    bot: &Bot,
-    chat_id: ChatId,
-    property: &crate::models::Property,
-) -> HandlerResult {
-    let text = format!(
-        "🏠 {}\n\n\
-         {}\n\n\
-         💰 Цена: {} ₽\n\
-         🛏 Комнат: {}\n\
-         📐 Площадь: {:.1} м²\n\
-         📍 {}, {}\n\n\
-         ID: {}",
-        property.title,
-        property.description,
-        format_price(property.price),
-        property.rooms,
-        property.area,
-        property.city,
-        property.district,
-        property.id,
-    );
-
-    let keyboard =
-        property_keyboard(&property.id.to_string());
-
-    match &property.photo_url {
-        Some(photo_url) if !photo_url.trim().is_empty() => {
-            bot.send_photo(
-                chat_id,
-                InputFile::url(
-                    photo_url
-                        .parse()
-                        .context("Некорректный URL фотографии")?,
-                ),
-            )
-            .caption(text)
-            .reply_markup(keyboard)
-            .await?;
-        }
-
-        _ => {
-            bot.send_message(
-                chat_id,
-                text,
-            )
-            .reply_markup(keyboard)
-            .await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Показывает следующий объект.
-///
-/// Для простоты используется поиск по всем активным объектам
-/// и выбирается следующий после текущего ID.
 async fn show_next_property(
     bot: Bot,
-    message: Option<&teloxide::types::MaybeInaccessibleMessage>,
-    telegram_id: i64,
-    current_property_id: Uuid,
+    chat_id: ChatId,
+    current_property_id: &str,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let message = match message {
-        Some(message) => message,
-        None => return Ok(()),
+) -> Result<()> {
+    let current_id = Uuid::parse_str(current_property_id)
+        .context("Некорректный ID объекта")?;
+
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
     };
 
-    let user = get_user(
-        &state,
-        telegram_id,
-    )
-    .await?
-    .context("Пользователь не найден")?;
-
-    let profile = operations::get_profile(
-        &state.db,
-        user.id,
-    )
-    .await?
-    .context("Профиль пользователя не найден")?;
-
-    let city = match profile.city {
-        Some(value) => value,
-        None => return Ok(()),
+    let Some(profile) = operations::get_profile(&state.db, user.id).await? else {
+        return Ok(());
     };
 
-    let district = match profile.district {
-        Some(value) => value,
-        None => return Ok(()),
-    };
-
-    let budget = match profile.budget {
-        Some(value) => value,
-        None => return Ok(()),
-    };
-
-    let rooms = match profile.rooms {
-        Some(value) => value,
-        None => return Ok(()),
+    let (Some(city), Some(district), Some(budget), Some(rooms)) = (
+        profile.city,
+        profile.district,
+        profile.budget,
+        profile.rooms,
+    ) else {
+        return Ok(());
     };
 
     let properties = operations::search_properties(
@@ -943,71 +685,156 @@ async fn show_next_property(
     )
     .await?;
 
-    let current_index = properties
+    let Some(current_index) = properties
         .iter()
-        .position(|property| property.id == current_property_id);
-
-    let next = match current_index {
-        Some(index) => properties.get(index + 1),
-        None => properties.first(),
+        .position(|property| property.id == current_id)
+    else {
+        return Ok(());
     };
 
-    let next = match next {
-        Some(property) => property,
-        None => {
-            bot.send_message(
-                message.chat().id,
-                "Это был последний подходящий объект.",
-            )
-            .await?;
+    let Some(next_property) = properties.get(current_index + 1) else {
+        bot.send_message(
+            chat_id,
+            "Это последний подходящий вариант. 🏠",
+        )
+        .await?;
 
-            return Ok(());
-        }
+        return Ok(());
     };
 
     send_property_card(
         &bot,
-        message.chat().id,
-        next,
+        chat_id,
+        next_property,
     )
     .await?;
 
     Ok(())
 }
 
-/// Показывает профиль пользователя.
+async fn send_property_card(
+    bot: &Bot,
+    chat_id: ChatId,
+    property: &crate::models::Property,
+) -> Result<()> {
+    let text = format!(
+        "🏠 <b>{}</b>\n\n\
+         {}\n\n\
+         📍 {} — {}\n\
+         💰 {} ₽\n\
+         🛏 Комнат: {}\n\
+         📐 Площадь: {:.1} м²",
+        escape_html(&property.title),
+        escape_html(&property.description),
+        escape_html(&property.city),
+        escape_html(&property.district),
+        format_price(property.price),
+        property.rooms,
+        property.area,
+    );
+
+    if let Some(photo_url) = property.photo_url.as_deref() {
+        match photo_url.parse() {
+            Ok(url) => {
+                bot.send_photo(
+                    chat_id,
+                    InputFile::url(url),
+                )
+                .caption(text)
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboards::property_keyboard(property.id))
+                .await?;
+            }
+            Err(_) => {
+                bot.send_message(chat_id, text)
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(keyboards::property_keyboard(property.id))
+                    .await?;
+            }
+        }
+    } else {
+        bot.send_message(chat_id, text)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboards::property_keyboard(property.id))
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn add_favorite(
+    bot: Bot,
+    chat_id: ChatId,
+    property_id: &str,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let property_id = Uuid::parse_str(property_id)
+        .context("Некорректный ID объекта")?;
+
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
+    };
+
+    operations::add_to_favorites(
+        &state.db,
+        user.id,
+        property_id,
+    )
+    .await?;
+
+    bot.send_message(
+        chat_id,
+        "⭐ Объект добавлен в избранное.",
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn remove_favorite(
+    bot: Bot,
+    chat_id: ChatId,
+    property_id: &str,
+    state: Arc<AppState>,
+) -> Result<()> {
+    let property_id = Uuid::parse_str(property_id)
+        .context("Некорректный ID объекта")?;
+
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
+    };
+
+    operations::remove_from_favorites(
+        &state.db,
+        user.id,
+        property_id,
+    )
+    .await?;
+
+    bot.send_message(
+        chat_id,
+        "Объект удалён из избранного.",
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn show_profile(
     bot: Bot,
     message: Message,
-    telegram_id: i64,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let user = get_user(
-        &state,
-        telegram_id,
-    )
-    .await?;
-
-    let user = match user {
-        Some(user) => user,
-        None => {
-            bot.send_message(
-                message.chat.id,
-                "Профиль не найден. Используйте /start.",
-            )
+) -> Result<()> {
+    let Some(user) = get_user(&state, &message).await? else {
+        bot.send_message(message.chat.id, "Выполните /start.")
             .await?;
 
-            return Ok(());
-        }
+        return Ok(());
     };
 
-    let profile = operations::get_profile(
-        &state.db,
-        user.id,
-    )
-    .await?;
+    let profile = operations::get_profile(&state.db, user.id).await?;
 
-    let profile_text = match profile {
+    let text = match profile {
         Some(profile) => format!(
             "👤 <b>Ваш профиль</b>\n\n\
              Имя: {}\n\
@@ -1016,80 +843,62 @@ async fn show_profile(
              Район: {}\n\
              Бюджет: {}\n\
              Комнат: {}\n\
-             Дополнительно: {}",
-            user.first_name,
-            user.phone.as_deref().unwrap_or("не указан"),
-            profile.city.as_deref().unwrap_or("не указан"),
-            profile.district.as_deref().unwrap_or("не указан"),
+             Пожелания: {}",
+            escape_html(&user.first_name),
+            escape_html(user.phone.as_deref().unwrap_or("не указан")),
+            escape_html(profile.city.as_deref().unwrap_or("не указан")),
+            escape_html(profile.district.as_deref().unwrap_or("не указан")),
             profile
                 .budget
                 .map(format_price)
+                .map(|value| format!("{value} ₽"))
                 .unwrap_or_else(|| "не указан".to_owned()),
             profile
                 .rooms
-                .map(|rooms| rooms.to_string())
+                .map(|value| value.to_string())
                 .unwrap_or_else(|| "не указано".to_owned()),
-            profile
-                .additional_requirements
-                .as_deref()
-                .unwrap_or("нет"),
+            escape_html(
+                profile
+                    .additional_requirements
+                    .as_deref()
+                    .unwrap_or("нет"),
+            ),
         ),
-
-        None => format!(
-            "👤 <b>Ваш профиль</b>\n\nИмя: {}",
-            user.first_name
-        ),
+        None => "Профиль ещё не создан.".to_owned(),
     };
 
-    bot.send_message(
-        message.chat.id,
-        profile_text,
-    )
-    .parse_mode(teloxide::types::ParseMode::Html)
-    .reply_markup(main_menu())
-    .await?;
+    bot.send_message(message.chat.id, text)
+        .parse_mode(ParseMode::Html)
+        .reply_markup(keyboards::main_menu())
+        .await?;
 
     Ok(())
 }
 
-/// Показывает избранные объекты.
 async fn show_favorites(
     bot: Bot,
     message: Message,
-    telegram_id: i64,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let user = get_user(
-        &state,
-        telegram_id,
-    )
-    .await?;
-
-    let user = match user {
-        Some(user) => user,
-        None => {
-            bot.send_message(
-                message.chat.id,
-                "Сначала зарегистрируйтесь через /start.",
-            )
+) -> Result<()> {
+    let Some(user) = get_user(&state, &message).await? else {
+        bot.send_message(message.chat.id, "Выполните /start.")
             .await?;
 
-            return Ok(());
-        }
+        return Ok(());
     };
 
-    let favorites = operations::get_favorites(
+    let properties = operations::get_favorites(
         &state.db,
         user.id,
     )
     .await?;
 
-    if favorites.is_empty() {
+    if properties.is_empty() {
         bot.send_message(
             message.chat.id,
-            "⭐ В избранном пока ничего нет.",
+            "⭐ Избранное пока пустое.",
         )
-        .reply_markup(main_menu())
+        .reply_markup(keyboards::main_menu())
         .await?;
 
         return Ok(());
@@ -1097,301 +906,208 @@ async fn show_favorites(
 
     bot.send_message(
         message.chat.id,
-        format!(
-            "⭐ В избранном объектов: {}",
-            favorites.len()
-        ),
+        format!("⭐ Избранное: {} объектов", properties.len()),
     )
     .await?;
 
-    for property in favorites {
+    for property in properties {
         let text = format!(
-            "🏠 {}\n\n\
+            "🏠 <b>{}</b>\n\n\
+             📍 {} — {}\n\
              💰 {} ₽\n\
-             🛏 {} комнат\n\
-             📐 {:.1} м²\n\
-             📍 {}, {}",
-            property.title,
+             🛏 {} комн.\n\
+             📐 {:.1} м²\n\n\
+             {}",
+            escape_html(&property.title),
+            escape_html(&property.city),
+            escape_html(&property.district),
             format_price(property.price),
             property.rooms,
             property.area,
-            property.city,
-            property.district,
+            escape_html(&property.description),
         );
 
-        bot.send_message(
-            message.chat.id,
-            text,
-        )
-        .reply_markup(
-            favorites_keyboard(
-                &property.id.to_string()
-            )
-        )
-        .await?;
+        if let Some(photo_url) = property.photo_url.as_deref() {
+            if let Ok(url) = photo_url.parse() {
+                bot.send_photo(
+                    message.chat.id,
+                    InputFile::url(url),
+                )
+                .caption(text)
+                .parse_mode(ParseMode::Html)
+                .reply_markup(keyboards::favorites_keyboard(property.id))
+                .await?;
+
+                continue;
+            }
+        }
+
+        bot.send_message(message.chat.id, text)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboards::favorites_keyboard(property.id))
+            .await?;
     }
 
     Ok(())
 }
 
-/// Создаёт заявку на просмотр.
 async fn create_viewing_request(
     bot: Bot,
-    message: Option<&teloxide::types::MaybeInaccessibleMessage>,
-    telegram_id: i64,
-    property_id: Uuid,
+    chat_id: ChatId,
+    property_id: &str,
     state: Arc<AppState>,
-) -> HandlerResult {
-    let user = get_user(
-        &state,
-        telegram_id,
-    )
-    .await?
-    .context("Пользователь не найден")?;
+) -> Result<()> {
+    let property_id = Uuid::parse_str(property_id)
+        .context("Некорректный ID объекта")?;
 
-    let property = sqlx::query_as::<
-        _,
-        crate::models::Property,
-    >(
-        r#"
-        SELECT *
-        FROM properties
-        WHERE id = $1
-        "#,
-    )
-    .bind(property_id)
-    .fetch_optional(&state.db)
-    .await?
-    .context("Объект недвижимости не найден")?;
-
-    let request = ViewingRequest {
-        id: Uuid::new_v4(),
-        user_id: user.id,
-        property_id,
-        status: RequestStatus::New,
-        comment: None,
-        created_at: Utc::now(),
+    let Some(user) = get_user_by_chat_id(&state, chat_id).await? else {
+        return Ok(());
     };
 
-    operations::create_viewing_request(
+    let Some(property) =
+        operations::get_property(&state.db, property_id).await?
+    else {
+        bot.send_message(
+            chat_id,
+            "Объект больше недоступен.",
+        )
+        .await?;
+
+        return Ok(());
+    };
+
+    let request = operations::create_viewing_request(
         &state.db,
-        &request,
+        user.id,
+        property.id,
+        None,
     )
     .await?;
 
-    // Отправляем уведомление менеджеру.
-    let notification = format!(
-        "📨 <b>Новая заявка на просмотр</b>\n\n\
-         👤 Клиент: {} {}\n\
-         🆔 Telegram ID: {}\n\
-         📱 Телефон: {}\n\n\
+    let admin_message = format!(
+        "📋 <b>Новая заявка на просмотр</b>\n\n\
+         🆔 Заявка: <code>{}</code>\n\
+         👤 Клиент: {}\n\
+         📱 Телефон: {}\n\
          🏠 Объект: {}\n\
-         💰 Цена: {} ₽\n\
-         📍 {}, {}\n\
-         🆔 ID заявки: {}",
-        user.first_name,
-        user.last_name.as_deref().unwrap_or(""),
-        user.telegram_id,
-        user.phone.as_deref().unwrap_or("не указан"),
-        property.title,
-        format_price(property.price),
-        property.city,
-        property.district,
+         💰 Цена: {} ₽",
         request.id,
+        escape_html(&user.first_name),
+        escape_html(user.phone.as_deref().unwrap_or("не указан")),
+        escape_html(&property.title),
+        format_price(property.price),
     );
 
     bot.send_message(
         ChatId(state.config.admin_chat_id),
-        notification,
+        admin_message,
     )
-    .parse_mode(teloxide::types::ParseMode::Html)
+    .parse_mode(ParseMode::Html)
     .await?;
 
-    if let Some(message) = message {
-        bot.send_message(
-            message.chat().id,
-            "✅ Заявка отправлена менеджеру!\n\n\
-             С вами свяжутся для согласования времени просмотра.",
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-/// Получает пользователя по Telegram ID.
-async fn get_user(
-    state: &AppState,
-    telegram_id: i64,
-) -> Result<Option<User>> {
-    Ok(
-        operations::get_user_by_telegram_id(
-            &state.db,
-            telegram_id,
-        )
-        .await?
+    bot.send_message(
+        chat_id,
+        "✅ Заявка отправлена!\n\nМенеджер свяжется с вами для согласования просмотра.",
     )
-}
-
-/// Получает существующий профиль.
-async fn get_profile_for_user(
-    state: &AppState,
-    telegram_id: i64,
-) -> Result<Option<UserProfile>> {
-    let user = get_user(
-        state,
-        telegram_id,
-    )
-    .await?;
-
-    match user {
-        Some(user) => {
-            operations::get_profile(
-                &state.db,
-                user.id,
-            )
-            .await
-        }
-
-        None => Ok(None),
-    }
-}
-
-/// Получает профиль или создаёт его.
-///
-/// Используется callback-обработчиками, чтобы не дублировать
-/// код создания пользователя.
-async fn get_or_create_profile(
-    state: &AppState,
-    telegram_id: i64,
-    first_name: String,
-    username: Option<String>,
-) -> Result<Option<UserProfile>> {
-    let user = match get_user(
-        state,
-        telegram_id,
-    )
-    .await? {
-        Some(user) => user,
-
-        None => {
-            let user = User {
-                id: Uuid::new_v4(),
-                telegram_id,
-                username,
-                first_name,
-                last_name: None,
-                phone: None,
-                created_at: Utc::now(),
-            };
-
-            operations::create_user(
-                &state.db,
-                &user,
-            )
-            .await?;
-
-            user
-        }
-    };
-
-    let profile = operations::get_profile(
-        &state.db,
-        user.id,
-    )
-    .await?;
-
-    if let Some(profile) = profile {
-        return Ok(Some(profile));
-    }
-
-    let profile = UserProfile {
-        id: Uuid::new_v4(),
-        user_id: user.id,
-        city: None,
-        district: None,
-        budget: None,
-        rooms: None,
-        additional_requirements: None,
-    };
-
-    operations::create_profile(
-        &state.db,
-        &profile,
-    )
-    .await?;
-
-    Ok(Some(profile))
-}
-
-/// Удаляет объект из избранного.
-async fn remove_favorite(
-    state: &AppState,
-    user_id: Uuid,
-    property_id: Uuid,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM favorites
-        WHERE user_id = $1
-          AND property_id = $2
-        "#,
-    )
-    .bind(user_id)
-    .bind(property_id)
-    .execute(&state.db)
+    .reply_markup(keyboards::main_menu())
     .await?;
 
     Ok(())
 }
 
-/// Форматирует цену с разделением тысяч.
-fn format_price(price: i64) -> String {
-    let mut value = price.abs().to_string();
-    let mut result = String::new();
-
-    while value.len() > 3 {
-        let split = value.split_off(value.len() - 3);
-
-        if result.is_empty() {
-            result = split;
-        } else {
-            result = format!("{} {}", split, result);
-        }
-    }
-
-    if result.is_empty() {
-        result = value;
-    } else {
-        result = format!("{} {}", value, result);
-    }
-
-    if price < 0 {
-        format!("-{}", result)
-    } else {
-        result
-    }
-}
-
-/// Показывает справку.
 async fn show_help(
     bot: Bot,
     message: Message,
-) -> HandlerResult {
-    bot.send_message(
-        message.chat.id,
-        "ℹ <b>Помощь</b>\n\n\
-         /start — регистрация\n\
-         /search — подбор недвижимости\n\
-         /profile — ваш профиль\n\
-         /favorites — избранные объекты\n\
-         /help — помощь\n\n\
-         После выбора объекта вы можете добавить его \
-         в избранное или отправить заявку на просмотр.",
-    )
-    .parse_mode(teloxide::types::ParseMode::Html)
-    .reply_markup(main_menu())
-    .await?;
+) -> Result<()> {
+    let text = "\
+ℹ️ <b>Помощь</b>
+
+\
+🏠 <b>Подобрать недвижимость</b> — запустит подбор объекта по вашим параметрам.
+
+\
+⭐ <b>Избранное</b> — сохранённые варианты.
+
+\
+👤 <b>Профиль</b> — ваши контактные данные и параметры поиска.
+
+\
+📅 <b>Записаться</b> — отправляет заявку менеджеру.
+
+\
+Команды:
+/start — запуск бота
+/search — поиск
+/profile — профиль
+/favorites — избранное
+/help — помощь";
+
+    bot.send_message(message.chat.id, text)
+        .parse_mode(ParseMode::Html)
+        .reply_markup(keyboards::main_menu())
+        .await?;
 
     Ok(())
+}
+
+async fn get_user(
+    state: &Arc<AppState>,
+    message: &Message,
+) -> Result<Option<crate::models::User>> {
+    let Some(from) = message.from.as_ref() else {
+        return Ok(None);
+    };
+
+    operations::get_user_by_telegram_id(
+        &state.db,
+        from.id.0 as i64,
+    )
+    .await
+}
+
+async fn get_user_by_chat_id(
+    state: &Arc<AppState>,
+    chat_id: ChatId,
+) -> Result<Option<crate::models::User>> {
+    operations::get_user_by_telegram_id(
+        &state.db,
+        chat_id.0,
+    )
+    .await
+}
+
+async fn get_or_create_profile(
+    state: &Arc<AppState>,
+    user_id: Uuid,
+) -> Result<crate::models::UserProfile> {
+    if let Some(profile) =
+        operations::get_profile(&state.db, user_id).await?
+    {
+        return Ok(profile);
+    }
+
+    operations::create_profile(&state.db, user_id).await
+}
+
+fn format_price(price: i64) -> String {
+    let value = price.to_string();
+    let mut result = String::with_capacity(value.len() + value.len() / 3);
+
+    for (index, character) in value.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            result.push(' ');
+        }
+
+        result.push(character);
+    }
+
+    result.chars().rev().collect()
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
