@@ -1,22 +1,4 @@
-// src/models.rs
-
-/*!
-    Модели предметной области.
-
-    Данный модуль содержит все основные структуры проекта.
-
-    Здесь описываются:
-
-    • Пользователи
-    • Профили
-    • Объекты недвижимости
-    • Избранное
-    • Заявки на просмотр
-    • Статусы заявок
-    • Состояния регистрации (FSM)
-
-    Все структуры совместимы с SQLx и Serde.
-*/
+use std::{fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -24,156 +6,81 @@ use sqlx::FromRow;
 use teloxide::macros::BotCommands;
 use uuid::Uuid;
 
-////////////////////////////////////////////////////////////////////////////////
-// Telegram-команды
-////////////////////////////////////////////////////////////////////////////////
-
-/// Основные команды Telegram-бота.
-#[derive(BotCommands, Clone)]
+#[derive(BotCommands, Clone, Debug)]
 #[command(rename_rule = "lowercase")]
 pub enum Command {
-    #[command(description = "запустить бота")]
+    #[command(description = "Запустить бота")]
     Start,
 
-    #[command(description = "мой профиль")]
+    #[command(description = "Показать профиль")]
     Profile,
 
-    #[command(description = "начать подбор недвижимости")]
+    #[command(description = "Подобрать недвижимость")]
     Search,
 
-    #[command(description = "избранное")]
+    #[command(description = "Показать избранное")]
     Favorites,
 
-    #[command(description = "помощь")]
+    #[command(description = "Помощь")]
     Help,
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Пользователь
-////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct User {
     pub id: Uuid,
-
-    /// Telegram ID пользователя.
     pub telegram_id: i64,
-
     pub username: Option<String>,
-
     pub first_name: String,
-
     pub last_name: Option<String>,
-
     pub phone: Option<String>,
-
     pub created_at: DateTime<Utc>,
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Профиль пользователя
-////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct UserProfile {
     pub id: Uuid,
-
     pub user_id: Uuid,
-
     pub city: Option<String>,
-
     pub district: Option<String>,
-
     pub budget: Option<i64>,
-
     pub rooms: Option<i32>,
-
     pub additional_requirements: Option<String>,
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Объект недвижимости
-////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Property {
     pub id: Uuid,
-
-    /// Заголовок объявления.
     pub title: String,
-
-    /// Полное описание.
     pub description: String,
-
     pub city: String,
-
     pub district: String,
-
     pub price: i64,
-
     pub rooms: i32,
-
     pub area: f32,
-
-    /// Ссылка на фотографию.
-    ///
-    /// В дальнейшем можно заменить на Telegram file_id.
     pub photo_url: Option<String>,
-
     pub is_active: bool,
-
     pub created_at: DateTime<Utc>,
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Избранное
-////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Favorite {
     pub id: Uuid,
-
     pub user_id: Uuid,
-
     pub property_id: Uuid,
-
     pub created_at: DateTime<Utc>,
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Заявка на просмотр
-////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ViewingRequest {
     pub id: Uuid,
-
     pub user_id: Uuid,
-
     pub property_id: Uuid,
-
     pub status: RequestStatus,
-
     pub comment: Option<String>,
-
     pub created_at: DateTime<Utc>,
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Статусы заявки
-////////////////////////////////////////////////////////////////////////////////
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    sqlx::Type,
-    PartialEq,
-    Eq,
-)]
-#[sqlx(type_name = "TEXT")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RequestStatus {
     New,
     InProgress,
@@ -188,38 +95,82 @@ impl Default for RequestStatus {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// FSM регистрации
-////////////////////////////////////////////////////////////////////////////////
+impl fmt::Display for RequestStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::New => "New",
+            Self::InProgress => "InProgress",
+            Self::Approved => "Approved",
+            Self::Rejected => "Rejected",
+            Self::Completed => "Completed",
+        };
 
-/// Этапы заполнения анкеты пользователя.
-///
-/// Позже эти состояния будут использоваться
-/// в teloxide::dispatching::dialogue.
+        formatter.write_str(value)
+    }
+}
+
+impl FromStr for RequestStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "New" => Ok(Self::New),
+            "InProgress" => Ok(Self::InProgress),
+            "Approved" => Ok(Self::Approved),
+            "Rejected" => Ok(Self::Rejected),
+            "Completed" => Ok(Self::Completed),
+            _ => Err(format!("Неизвестный статус заявки: {value}")),
+        }
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for RequestStatus {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'r>,
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        let value = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+
+        value
+            .parse()
+            .map_err(|error: String| error.into())
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for RequestStatus {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'q> sqlx::Encode<'q, sqlx::Postgres> for RequestStatus {
+    fn encode_by_ref(
+        &self,
+        buf: &mut Vec<u8>,
+    ) -> sqlx::encode::IsNull {
+        <String as sqlx::Encode<sqlx::Postgres>>::encode_by_ref(
+            &self.to_string(),
+            buf,
+        )
+    }
+
+    fn produces(&self) -> Option<sqlx::postgres::PgTypeInfo> {
+        Some(<String as sqlx::Type<sqlx::Postgres>>::type_info())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum RegistrationState {
-    /// Пользователь ещё не начал регистрацию.
     #[default]
     Start,
-
-    /// Ввод телефона.
     WaitingPhone,
-
-    /// Выбор города.
     WaitingCity,
-
-    /// Выбор района.
     WaitingDistrict,
-
-    /// Ввод бюджета.
     WaitingBudget,
-
-    /// Выбор количества комнат.
     WaitingRooms,
-
-    /// Дополнительные требования.
     WaitingAdditionalRequirements,
-
-    /// Регистрация завершена.
     Completed,
 }
