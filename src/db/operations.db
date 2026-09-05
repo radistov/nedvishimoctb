@@ -1,0 +1,352 @@
+// src/db/operations.rs
+
+/*!
+    Основные операции с базой данных.
+
+    Данный модуль содержит все функции, которые работают с PostgreSQL.
+    В обработчиках Telegram-бота не должно быть "сырого" SQL — только
+    вызовы функций из этого файла.
+
+    По мере развития проекта сюда будут добавляться новые методы.
+
+    Текущие группы операций:
+
+    • Пользователи
+    • Профили
+    • Недвижимость
+    • Избранное
+    • Заявки на просмотр
+*/
+
+use anyhow::Result;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::models::{
+    Favorite, Property, RequestStatus, User, UserProfile, ViewingRequest,
+};
+
+////////////////////////////////////////////////////////////////////////////////
+// Пользователи
+////////////////////////////////////////////////////////////////////////////////
+
+/// Получить пользователя по Telegram ID.
+///
+/// Возвращает:
+/// - Ok(Some(User)) — пользователь найден;
+/// - Ok(None) — пользователь отсутствует.
+pub async fn get_user_by_telegram_id(
+    pool: &PgPool,
+    telegram_id: i64,
+) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        SELECT *
+        FROM users
+        WHERE telegram_id = $1
+        "#,
+    )
+    .bind(telegram_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(user)
+}
+
+/// Создать нового пользователя.
+pub async fn create_user(pool: &PgPool, user: &User) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO users
+        (
+            id,
+            telegram_id,
+            username,
+            first_name,
+            last_name,
+            phone,
+            created_at
+        )
+        VALUES
+        (
+            $1,$2,$3,$4,$5,$6,$7
+        )
+        "#,
+    )
+    .bind(user.id)
+    .bind(user.telegram_id)
+    .bind(&user.username)
+    .bind(&user.first_name)
+    .bind(&user.last_name)
+    .bind(&user.phone)
+    .bind(user.created_at)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Профиль
+////////////////////////////////////////////////////////////////////////////////
+
+/// Получить профиль пользователя.
+pub async fn get_profile(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<UserProfile>> {
+    let profile = sqlx::query_as::<_, UserProfile>(
+        r#"
+        SELECT *
+        FROM user_profiles
+        WHERE user_id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(profile)
+}
+
+/// Создать профиль.
+pub async fn create_profile(
+    pool: &PgPool,
+    profile: &UserProfile,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO user_profiles
+        (
+            id,
+            user_id,
+            city,
+            district,
+            budget,
+            rooms,
+            additional_requirements
+        )
+        VALUES
+        (
+            $1,$2,$3,$4,$5,$6,$7
+        )
+        "#,
+    )
+    .bind(profile.id)
+    .bind(profile.user_id)
+    .bind(&profile.city)
+    .bind(&profile.district)
+    .bind(profile.budget)
+    .bind(profile.rooms)
+    .bind(&profile.additional_requirements)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Обновить параметры поиска пользователя.
+pub async fn update_profile(
+    pool: &PgPool,
+    profile: &UserProfile,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE user_profiles
+        SET
+            city = $2,
+            district = $3,
+            budget = $4,
+            rooms = $5,
+            additional_requirements = $6
+        WHERE user_id = $1
+        "#,
+    )
+    .bind(profile.user_id)
+    .bind(&profile.city)
+    .bind(&profile.district)
+    .bind(profile.budget)
+    .bind(profile.rooms)
+    .bind(&profile.additional_requirements)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Недвижимость
+////////////////////////////////////////////////////////////////////////////////
+
+/// Найти объекты по параметрам пользователя.
+///
+/// На первом этапе используется простой фильтр.
+/// Позже можно добавить:
+///
+/// • диапазон бюджета;
+/// • сортировку;
+/// • пагинацию;
+/// • полнотекстовый поиск;
+/// • геопоиск.
+pub async fn search_properties(
+    pool: &PgPool,
+    city: &str,
+    district: &str,
+    budget: i64,
+    rooms: i32,
+) -> Result<Vec<Property>> {
+    let properties = sqlx::query_as::<_, Property>(
+        r#"
+        SELECT *
+        FROM properties
+        WHERE
+            is_active = TRUE
+            AND city = $1
+            AND district = $2
+            AND price <= $3
+            AND rooms = $4
+        ORDER BY price ASC
+        "#,
+    )
+    .bind(city)
+    .bind(district)
+    .bind(budget)
+    .bind(rooms)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(properties)
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Избранное
+////////////////////////////////////////////////////////////////////////////////
+
+/// Добавить объект в избранное.
+pub async fn add_to_favorites(
+    pool: &PgPool,
+    favorite: &Favorite,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO favorites
+        (
+            id,
+            user_id,
+            property_id,
+            created_at
+        )
+        VALUES
+        (
+            $1,$2,$3,$4
+        )
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(favorite.id)
+    .bind(favorite.user_id)
+    .bind(favorite.property_id)
+    .bind(favorite.created_at)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Получить список избранного пользователя.
+pub async fn get_favorites(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<Property>> {
+    let list = sqlx::query_as::<_, Property>(
+        r#"
+        SELECT p.*
+        FROM properties p
+        INNER JOIN favorites f
+            ON p.id = f.property_id
+        WHERE f.user_id = $1
+        ORDER BY f.created_at DESC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(list)
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Заявки
+////////////////////////////////////////////////////////////////////////////////
+
+/// Создать новую заявку на просмотр.
+pub async fn create_viewing_request(
+    pool: &PgPool,
+    request: &ViewingRequest,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO viewing_requests
+        (
+            id,
+            user_id,
+            property_id,
+            status,
+            comment,
+            created_at
+        )
+        VALUES
+        (
+            $1,$2,$3,$4,$5,$6
+        )
+        "#,
+    )
+    .bind(request.id)
+    .bind(request.user_id)
+    .bind(request.property_id)
+    .bind(request.status)
+    .bind(&request.comment)
+    .bind(request.created_at)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Получить все заявки.
+pub async fn get_requests(
+    pool: &PgPool,
+) -> Result<Vec<ViewingRequest>> {
+    let requests = sqlx::query_as::<_, ViewingRequest>(
+        r#"
+        SELECT *
+        FROM viewing_requests
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(requests)
+}
+
+/// Изменить статус заявки.
+pub async fn update_request_status(
+    pool: &PgPool,
+    request_id: Uuid,
+    status: RequestStatus,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE viewing_requests
+        SET status = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(request_id)
+    .bind(status)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
