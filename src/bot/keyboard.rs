@@ -1,13 +1,9 @@
-// src/bot/keyboards.rs
-
 use teloxide::types::{
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    KeyboardMarkup,
+    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup,
 };
 
-/// Главное меню пользователя.
+use uuid::Uuid;
+
 pub fn main_menu() -> KeyboardMarkup {
     KeyboardMarkup::new(vec![
         vec![KeyboardButton::new("🏠 Подобрать недвижимость")],
@@ -15,196 +11,128 @@ pub fn main_menu() -> KeyboardMarkup {
             KeyboardButton::new("⭐ Избранное"),
             KeyboardButton::new("👤 Профиль"),
         ],
-        vec![KeyboardButton::new("ℹ Помощь")],
+        vec![KeyboardButton::new("ℹ️ Помощь")],
     ])
     .resize_keyboard()
 }
 
-/// Кнопка запроса номера телефона.
 pub fn request_phone() -> KeyboardMarkup {
     KeyboardMarkup::new(vec![vec![
-        KeyboardButton::new("📱 Отправить номер телефона")
-            .request_contact(true),
-    ]])
+        KeyboardButton::new("📱 Отправить номер телефона").request_contact(true),
+    )])
     .resize_keyboard()
     .one_time_keyboard()
 }
 
-/// Выбор города.
-///
-/// Позже список будет загружаться из базы данных.
 pub fn city_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
-            InlineKeyboardButton::callback(
-                "Москва",
-                "city:Москва",
-            ),
-            InlineKeyboardButton::callback(
-                "Санкт-Петербург",
-                "city:Санкт-Петербург",
-            ),
+            InlineKeyboardButton::callback("Москва", "city:Москва"),
+            InlineKeyboardButton::callback("Санкт-Петербург", "city:Санкт-Петербург"),
         ],
         vec![
-            InlineKeyboardButton::callback(
-                "Казань",
-                "city:Казань",
-            ),
-            InlineKeyboardButton::callback(
-                "Екатеринбург",
-                "city:Екатеринбург",
-            ),
+            InlineKeyboardButton::callback("Казань", "city:Казань"),
+            InlineKeyboardButton::callback("Екатеринбург", "city:Екатеринбург"),
         ],
         vec![
-            InlineKeyboardButton::callback(
-                "Новосибирск",
-                "city:Новосибирск",
-            ),
+            InlineKeyboardButton::callback("Новосибирск", "city:Новосибирск"),
         ],
     ])
 }
 
-/// Районы.
-///
-/// Пока статический список.
-/// Позже будет зависеть от выбранного города.
 pub fn district_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
-            InlineKeyboardButton::callback(
-                "Центральный",
-                "district:Центральный",
-            ),
+            InlineKeyboardButton::callback("Центральный", "district:Центральный"),
+            InlineKeyboardButton::callback("Северный", "district:Северный"),
         ],
         vec![
-            InlineKeyboardButton::callback(
-                "Северный",
-                "district:Северный",
-            ),
-            InlineKeyboardButton::callback(
-                "Южный",
-                "district:Южный",
-            ),
+            InlineKeyboardButton::callback("Южный", "district:Южный"),
+            InlineKeyboardButton::callback("Западный", "district:Западный"),
         ],
         vec![
-            InlineKeyboardButton::callback(
-                "Восточный",
-                "district:Восточный",
-            ),
-            InlineKeyboardButton::callback(
-                "Западный",
-                "district:Западный",
-            ),
+            InlineKeyboardButton::callback("Восточный", "district:Восточный"),
         ],
     ])
 }
 
-/// Бюджет.
 pub fn budget_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
-            InlineKeyboardButton::callback(
-                "До 3 млн",
-                "budget:3000000",
-            ),
+            InlineKeyboardButton::callback("До 5 млн ₽", "budget:5000000"),
+            InlineKeyboardButton::callback("До 8 млн ₽", "budget:8000000"),
         ],
         vec![
-            InlineKeyboardButton::callback(
-                "До 5 млн",
-                "budget:5000000",
-            ),
+            InlineKeyboardButton::callback("До 10 млн ₽", "budget:10000000"),
+            InlineKeyboardButton::callback("До 15 млн ₽", "budget:15000000"),
         ],
         vec![
-            InlineKeyboardButton::callback(
-                "До 8 млн",
-                "budget:8000000",
-            ),
-        ],
-        vec![
-            InlineKeyboardButton::callback(
-                "До 10 млн",
-                "budget:10000000",
-            ),
-        ],
-        vec![
-            InlineKeyboardButton::callback(
-                "Без ограничений",
-                "budget:999999999",
-            ),
+            InlineKeyboardButton::callback("До 20 млн ₽", "budget:20000000"),
+            InlineKeyboardButton::callback("До 30 млн ₽", "budget:30000000"),
         ],
     ])
 }
 
-/// Количество комнат.
 pub fn rooms_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
-            InlineKeyboardButton::callback("1", "rooms:1"),
-            InlineKeyboardButton::callback("2", "rooms:2"),
+            InlineKeyboardButton::callback("1 комната", "rooms:1"),
+            InlineKeyboardButton::callback("2 комнаты", "rooms:2"),
         ],
         vec![
-            InlineKeyboardButton::callback("3", "rooms:3"),
-            InlineKeyboardButton::callback("4", "rooms:4"),
+            InlineKeyboardButton::callback("3 комнаты", "rooms:3"),
+            InlineKeyboardButton::callback("4 комнаты", "rooms:4"),
         ],
-        vec![
-            InlineKeyboardButton::callback("5+", "rooms:5"),
-        ],
+        vec![InlineKeyboardButton::callback("5+ комнат", "rooms:5")],
     ])
 }
 
-/// Кнопки карточки объекта.
-pub fn property_keyboard(property_id: &str) -> InlineKeyboardMarkup {
+pub fn property_keyboard(property_id: Uuid) -> InlineKeyboardMarkup {
+    let id = property_id.to_string();
+
     InlineKeyboardMarkup::new(vec![
         vec![
             InlineKeyboardButton::callback(
                 "⭐ В избранное",
-                format!("favorite:{property_id}"),
+                format!("favorite:{id}"),
             ),
-        ],
-        vec![
             InlineKeyboardButton::callback(
-                "📅 Записаться на просмотр",
-                format!("view:{property_id}"),
+                "📅 Записаться",
+                format!("view:{id}"),
             ),
         ],
-        vec![
-            InlineKeyboardButton::callback(
-                "➡ Следующий",
-                format!("next:{property_id}"),
-            ),
-        ],
+        vec![InlineKeyboardButton::callback(
+            "➡️ Следующий вариант",
+            format!("next:{id}"),
+        )],
     ])
 }
 
-/// Меню избранного.
-pub fn favorites_keyboard(property_id: &str) -> InlineKeyboardMarkup {
+pub fn favorites_keyboard(property_id: Uuid) -> InlineKeyboardMarkup {
+    let id = property_id.to_string();
+
     InlineKeyboardMarkup::new(vec![
         vec![
             InlineKeyboardButton::callback(
-                "🗑 Удалить",
-                format!("favorite_remove:{property_id}"),
+                "❌ Удалить",
+                format!("favorite_remove:{id}"),
             ),
-        ],
-        vec![
             InlineKeyboardButton::callback(
-                "📅 Просмотр",
-                format!("view:{property_id}"),
+                "📅 Записаться",
+                format!("view:{id}"),
             ),
         ],
     ])
 }
 
-/// Административное меню.
 pub fn admin_menu() -> KeyboardMarkup {
     KeyboardMarkup::new(vec![
+        vec![KeyboardButton::new("➕ Добавить объект")],
         vec![
-            KeyboardButton::new("➕ Добавить объект"),
-            KeyboardButton::new("📋 Объекты"),
+            KeyboardButton::new("🏠 Список объектов"),
+            KeyboardButton::new("📋 Заявки"),
         ],
-        vec![
-            KeyboardButton::new("📨 Заявки"),
-            KeyboardButton::new("📊 Статистика"),
-        ],
+        vec![KeyboardButton::new("📊 Статистика")],
     ])
     .resize_keyboard()
 }
