@@ -1,24 +1,5 @@
-// src/db/operations.rs
-
-/*!
-    Основные операции с базой данных.
-
-    Данный модуль содержит все функции, которые работают с PostgreSQL.
-    В обработчиках Telegram-бота не должно быть "сырого" SQL — только
-    вызовы функций из этого файла.
-
-    По мере развития проекта сюда будут добавляться новые методы.
-
-    Текущие группы операций:
-
-    • Пользователи
-    • Профили
-    • Недвижимость
-    • Избранное
-    • Заявки на просмотр
-*/
-
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -26,39 +7,13 @@ use crate::models::{
     Favorite, Property, RequestStatus, User, UserProfile, ViewingRequest,
 };
 
-////////////////////////////////////////////////////////////////////////////////
-// Пользователи
-////////////////////////////////////////////////////////////////////////////////
-
-/// Получить пользователя по Telegram ID.
-///
-/// Возвращает:
-/// - Ok(Some(User)) — пользователь найден;
-/// - Ok(None) — пользователь отсутствует.
 pub async fn get_user_by_telegram_id(
     pool: &PgPool,
     telegram_id: i64,
 ) -> Result<Option<User>> {
-    let user = sqlx::query_as::<_, User>(
+    sqlx::query_as::<_, User>(
         r#"
-        SELECT *
-        FROM users
-        WHERE telegram_id = $1
-        "#,
-    )
-    .bind(telegram_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(user)
-}
-
-/// Создать нового пользователя.
-pub async fn create_user(pool: &PgPool, user: &User) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO users
-        (
+        SELECT
             id,
             telegram_id,
             username,
@@ -66,58 +21,79 @@ pub async fn create_user(pool: &PgPool, user: &User) -> Result<()> {
             last_name,
             phone,
             created_at
-        )
-        VALUES
-        (
-            $1,$2,$3,$4,$5,$6,$7
-        )
+        FROM users
+        WHERE telegram_id = $1
         "#,
     )
-    .bind(user.id)
-    .bind(user.telegram_id)
-    .bind(&user.username)
-    .bind(&user.first_name)
-    .bind(&user.last_name)
-    .bind(&user.phone)
-    .bind(user.created_at)
+    .bind(telegram_id)
+    .fetch_optional(pool)
+    .await
+    .context("Не удалось получить пользователя")
+}
+
+pub async fn create_user(
+    pool: &PgPool,
+    telegram_id: i64,
+    username: Option<&str>,
+    first_name: &str,
+    last_name: Option<&str>,
+) -> Result<User> {
+    sqlx::query_as::<_, User>(
+        r#"
+        INSERT INTO users (
+            telegram_id,
+            username,
+            first_name,
+            last_name
+        )
+        VALUES ($1, $2, $3, $4)
+        RETURNING
+            id,
+            telegram_id,
+            username,
+            first_name,
+            last_name,
+            phone,
+            created_at
+        "#,
+    )
+    .bind(telegram_id)
+    .bind(username)
+    .bind(first_name)
+    .bind(last_name)
+    .fetch_one(pool)
+    .await
+    .context("Не удалось создать пользователя")
+}
+
+pub async fn update_user_phone(
+    pool: &PgPool,
+    user_id: Uuid,
+    phone: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET phone = $1
+        WHERE id = $2
+        "#,
+    )
+    .bind(phone)
+    .bind(user_id)
     .execute(pool)
-    .await?;
+    .await
+    .context("Не удалось сохранить номер телефона")?;
 
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Профиль
-////////////////////////////////////////////////////////////////////////////////
-
-/// Получить профиль пользователя.
 pub async fn get_profile(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Option<UserProfile>> {
-    let profile = sqlx::query_as::<_, UserProfile>(
+    sqlx::query_as::<_, UserProfile>(
         r#"
-        SELECT *
-        FROM user_profiles
-        WHERE user_id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(profile)
-}
-
-/// Создать профиль.
-pub async fn create_profile(
-    pool: &PgPool,
-    profile: &UserProfile,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO user_profiles
-        (
+        SELECT
             id,
             user_id,
             city,
@@ -125,69 +101,74 @@ pub async fn create_profile(
             budget,
             rooms,
             additional_requirements
-        )
-        VALUES
-        (
-            $1,$2,$3,$4,$5,$6,$7
-        )
+        FROM user_profiles
+        WHERE user_id = $1
         "#,
     )
-    .bind(profile.id)
-    .bind(profile.user_id)
-    .bind(&profile.city)
-    .bind(&profile.district)
-    .bind(profile.budget)
-    .bind(profile.rooms)
-    .bind(&profile.additional_requirements)
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .context("Не удалось получить профиль")
 }
 
-/// Обновить параметры поиска пользователя.
+pub async fn create_profile(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<UserProfile> {
+    sqlx::query_as::<_, UserProfile>(
+        r#"
+        INSERT INTO user_profiles (user_id)
+        VALUES ($1)
+        RETURNING
+            id,
+            user_id,
+            city,
+            district,
+            budget,
+            rooms,
+            additional_requirements
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("Не удалось создать профиль")
+}
+
 pub async fn update_profile(
     pool: &PgPool,
-    profile: &UserProfile,
+    user_id: Uuid,
+    city: Option<&str>,
+    district: Option<&str>,
+    budget: Option<i64>,
+    rooms: Option<i32>,
+    additional_requirements: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE user_profiles
         SET
-            city = $2,
-            district = $3,
-            budget = $4,
-            rooms = $5,
-            additional_requirements = $6
-        WHERE user_id = $1
+            city = $1,
+            district = $2,
+            budget = $3,
+            rooms = $4,
+            additional_requirements = $5
+        WHERE user_id = $6
         "#,
     )
-    .bind(profile.user_id)
-    .bind(&profile.city)
-    .bind(&profile.district)
-    .bind(profile.budget)
-    .bind(profile.rooms)
-    .bind(&profile.additional_requirements)
+    .bind(city)
+    .bind(district)
+    .bind(budget)
+    .bind(rooms)
+    .bind(additional_requirements)
+    .bind(user_id)
     .execute(pool)
-    .await?;
+    .await
+    .context("Не удалось обновить профиль")?;
 
     Ok(())
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Недвижимость
-////////////////////////////////////////////////////////////////////////////////
-
-/// Найти объекты по параметрам пользователя.
-///
-/// На первом этапе используется простой фильтр.
-/// Позже можно добавить:
-///
-/// • диапазон бюджета;
-/// • сортировку;
-/// • пагинацию;
-/// • полнотекстовый поиск;
-/// • геопоиск.
 pub async fn search_properties(
     pool: &PgPool,
     city: &str,
@@ -195,9 +176,20 @@ pub async fn search_properties(
     budget: i64,
     rooms: i32,
 ) -> Result<Vec<Property>> {
-    let properties = sqlx::query_as::<_, Property>(
+    sqlx::query_as::<_, Property>(
         r#"
-        SELECT *
+        SELECT
+            id,
+            title,
+            description,
+            city,
+            district,
+            price,
+            rooms,
+            area,
+            photo_url,
+            is_active,
+            created_at
         FROM properties
         WHERE
             is_active = TRUE
@@ -205,7 +197,7 @@ pub async fn search_properties(
             AND district = $2
             AND price <= $3
             AND rooms = $4
-        ORDER BY price ASC
+        ORDER BY price ASC, created_at DESC
         "#,
     )
     .bind(city)
@@ -213,124 +205,192 @@ pub async fn search_properties(
     .bind(budget)
     .bind(rooms)
     .fetch_all(pool)
-    .await?;
-
-    Ok(properties)
+    .await
+    .context("Не удалось выполнить поиск недвижимости")
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Избранное
-////////////////////////////////////////////////////////////////////////////////
+pub async fn get_property(
+    pool: &PgPool,
+    property_id: Uuid,
+) -> Result<Option<Property>> {
+    sqlx::query_as::<_, Property>(
+        r#"
+        SELECT
+            id,
+            title,
+            description,
+            city,
+            district,
+            price,
+            rooms,
+            area,
+            photo_url,
+            is_active,
+            created_at
+        FROM properties
+        WHERE id = $1
+        "#,
+    )
+    .bind(property_id)
+    .fetch_optional(pool)
+    .await
+    .context("Не удалось получить объект недвижимости")
+}
 
-/// Добавить объект в избранное.
 pub async fn add_to_favorites(
     pool: &PgPool,
-    favorite: &Favorite,
+    user_id: Uuid,
+    property_id: Uuid,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO favorites
-        (
-            id,
-            user_id,
-            property_id,
-            created_at
-        )
-        VALUES
-        (
-            $1,$2,$3,$4
-        )
-        ON CONFLICT DO NOTHING
+        INSERT INTO favorites (user_id, property_id)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id, property_id) DO NOTHING
         "#,
     )
-    .bind(favorite.id)
-    .bind(favorite.user_id)
-    .bind(favorite.property_id)
-    .bind(favorite.created_at)
+    .bind(user_id)
+    .bind(property_id)
     .execute(pool)
-    .await?;
+    .await
+    .context("Не удалось добавить объект в избранное")?;
 
     Ok(())
 }
 
-/// Получить список избранного пользователя.
+pub async fn remove_from_favorites(
+    pool: &PgPool,
+    user_id: Uuid,
+    property_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM favorites
+        WHERE user_id = $1 AND property_id = $2
+        "#,
+    )
+    .bind(user_id)
+    .bind(property_id)
+    .execute(pool)
+    .await
+    .context("Не удалось удалить объект из избранного")?;
+
+    Ok(())
+}
+
+pub async fn is_favorite(
+    pool: &PgPool,
+    user_id: Uuid,
+    property_id: Uuid,
+) -> Result<bool> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM favorites
+            WHERE user_id = $1 AND property_id = $2
+        )
+        "#,
+    )
+    .bind(user_id)
+    .bind(property_id)
+    .fetch_one(pool)
+    .await
+    .context("Не удалось проверить избранное")?;
+
+    Ok(exists)
+}
+
 pub async fn get_favorites(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Vec<Property>> {
-    let list = sqlx::query_as::<_, Property>(
+    sqlx::query_as::<_, Property>(
         r#"
-        SELECT p.*
+        SELECT
+            p.id,
+            p.title,
+            p.description,
+            p.city,
+            p.district,
+            p.price,
+            p.rooms,
+            p.area,
+            p.photo_url,
+            p.is_active,
+            p.created_at
         FROM properties p
         INNER JOIN favorites f
-            ON p.id = f.property_id
-        WHERE f.user_id = $1
+            ON f.property_id = p.id
+        WHERE
+            f.user_id = $1
+            AND p.is_active = TRUE
         ORDER BY f.created_at DESC
         "#,
     )
     .bind(user_id)
     .fetch_all(pool)
-    .await?;
-
-    Ok(list)
+    .await
+    .context("Не удалось получить избранные объекты")
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Заявки
-////////////////////////////////////////////////////////////////////////////////
-
-/// Создать новую заявку на просмотр.
 pub async fn create_viewing_request(
     pool: &PgPool,
-    request: &ViewingRequest,
-) -> Result<()> {
-    sqlx::query(
+    user_id: Uuid,
+    property_id: Uuid,
+    comment: Option<&str>,
+) -> Result<ViewingRequest> {
+    sqlx::query_as::<_, ViewingRequest>(
         r#"
-        INSERT INTO viewing_requests
-        (
+        INSERT INTO viewing_requests (
+            user_id,
+            property_id,
+            status,
+            comment
+        )
+        VALUES ($1, $2, $3, $4)
+        RETURNING
             id,
             user_id,
             property_id,
             status,
             comment,
             created_at
-        )
-        VALUES
-        (
-            $1,$2,$3,$4,$5,$6
-        )
         "#,
     )
-    .bind(request.id)
-    .bind(request.user_id)
-    .bind(request.property_id)
-    .bind(request.status)
-    .bind(&request.comment)
-    .bind(request.created_at)
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    .bind(user_id)
+    .bind(property_id)
+    .bind(RequestStatus::New.to_string())
+    .bind(comment)
+    .fetch_one(pool)
+    .await
+    .context("Не удалось создать заявку на просмотр")
 }
 
-/// Получить все заявки.
 pub async fn get_requests(
     pool: &PgPool,
+    user_id: Uuid,
 ) -> Result<Vec<ViewingRequest>> {
-    let requests = sqlx::query_as::<_, ViewingRequest>(
+    sqlx::query_as::<_, ViewingRequest>(
         r#"
-        SELECT *
+        SELECT
+            id,
+            user_id,
+            property_id,
+            status,
+            comment,
+            created_at
         FROM viewing_requests
+        WHERE user_id = $1
         ORDER BY created_at DESC
         "#,
     )
+    .bind(user_id)
     .fetch_all(pool)
-    .await?;
-
-    Ok(requests)
+    .await
+    .context("Не удалось получить заявки")
 }
 
-/// Изменить статус заявки.
 pub async fn update_request_status(
     pool: &PgPool,
     request_id: Uuid,
@@ -339,14 +399,374 @@ pub async fn update_request_status(
     sqlx::query(
         r#"
         UPDATE viewing_requests
-        SET status = $2
+        SET status = $1
+        WHERE id = $2
+        "#,
+    )
+    .bind(status.to_string())
+    .bind(request_id)
+    .execute(pool)
+    .await
+    .context("Не удалось изменить статус заявки")?;
+
+    Ok(())
+}
+
+pub async fn create_property(
+    pool: &PgPool,
+    title: &str,
+    description: &str,
+    city: &str,
+    district: &str,
+    price: i64,
+    rooms: i32,
+    area: f32,
+    photo_url: Option<&str>,
+    is_active: bool,
+) -> Result<Property> {
+    sqlx::query_as::<_, Property>(
+        r#"
+        INSERT INTO properties (
+            title,
+            description,
+            city,
+            district,
+            price,
+            rooms,
+            area,
+            photo_url,
+            is_active
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING
+            id,
+            title,
+            description,
+            city,
+            district,
+            price,
+            rooms,
+            area,
+            photo_url,
+            is_active,
+            created_at
+        "#,
+    )
+    .bind(title)
+    .bind(description)
+    .bind(city)
+    .bind(district)
+    .bind(price)
+    .bind(rooms)
+    .bind(area)
+    .bind(photo_url)
+    .bind(is_active)
+    .fetch_one(pool)
+    .await
+    .context("Не удалось создать объект недвижимости")
+}
+
+pub async fn update_property(
+    pool: &PgPool,
+    property_id: Uuid,
+    title: &str,
+    description: &str,
+    city: &str,
+    district: &str,
+    price: i64,
+    rooms: i32,
+    area: f32,
+    photo_url: Option<&str>,
+    is_active: bool,
+) -> Result<Option<Property>> {
+    sqlx::query_as::<_, Property>(
+        r#"
+        UPDATE properties
+        SET
+            title = $1,
+            description = $2,
+            city = $3,
+            district = $4,
+            price = $5,
+            rooms = $6,
+            area = $7,
+            photo_url = $8,
+            is_active = $9
+        WHERE id = $10
+        RETURNING
+            id,
+            title,
+            description,
+            city,
+            district,
+            price,
+            rooms,
+            area,
+            photo_url,
+            is_active,
+            created_at
+        "#,
+    )
+    .bind(title)
+    .bind(description)
+    .bind(city)
+    .bind(district)
+    .bind(price)
+    .bind(rooms)
+    .bind(area)
+    .bind(photo_url)
+    .bind(is_active)
+    .bind(property_id)
+    .fetch_optional(pool)
+    .await
+    .context("Не удалось обновить объект недвижимости")
+}
+
+pub async fn delete_property(
+    pool: &PgPool,
+    property_id: Uuid,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM properties
         WHERE id = $1
         "#,
     )
-    .bind(request_id)
-    .bind(status)
+    .bind(property_id)
     .execute(pool)
-    .await?;
+    .await
+    .context("Не удалось удалить объект недвижимости")?;
 
-    Ok(())
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn list_properties(
+    pool: &PgPool,
+    include_inactive: bool,
+) -> Result<Vec<Property>> {
+    let properties = if include_inactive {
+        sqlx::query_as::<_, Property>(
+            r#"
+            SELECT
+                id,
+                title,
+                description,
+                city,
+                district,
+                price,
+                rooms,
+                area,
+                photo_url,
+                is_active,
+                created_at
+            FROM properties
+            ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as::<_, Property>(
+            r#"
+            SELECT
+                id,
+                title,
+                description,
+                city,
+                district,
+                price,
+                rooms,
+                area,
+                photo_url,
+                is_active,
+                created_at
+            FROM properties
+            WHERE is_active = TRUE
+            ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+    };
+
+    properties.context("Не удалось получить список объектов")
+}
+
+pub async fn get_all_requests(
+    pool: &PgPool,
+) -> Result<Vec<(ViewingRequest, User, Property)>> {
+    sqlx::query_as::<_, (ViewingRequest, User, Property)>(
+        r#"
+        SELECT
+            vr.id,
+            vr.user_id,
+            vr.property_id,
+            vr.status,
+            vr.comment,
+            vr.created_at,
+
+            u.id,
+            u.telegram_id,
+            u.username,
+            u.first_name,
+            u.last_name,
+            u.phone,
+            u.created_at,
+
+            p.id,
+            p.title,
+            p.description,
+            p.city,
+            p.district,
+            p.price,
+            p.rooms,
+            p.area,
+            p.photo_url,
+            p.is_active,
+            p.created_at
+        FROM viewing_requests vr
+        INNER JOIN users u
+            ON u.id = vr.user_id
+        INNER JOIN properties p
+            ON p.id = vr.property_id
+        ORDER BY vr.created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("Не удалось получить список заявок")
+}
+
+pub async fn get_request(
+    pool: &PgPool,
+    request_id: Uuid,
+) -> Result<Option<(ViewingRequest, User, Property)>> {
+    sqlx::query_as::<_, (ViewingRequest, User, Property)>(
+        r#"
+        SELECT
+            vr.id,
+            vr.user_id,
+            vr.property_id,
+            vr.status,
+            vr.comment,
+            vr.created_at,
+
+            u.id,
+            u.telegram_id,
+            u.username,
+            u.first_name,
+            u.last_name,
+            u.phone,
+            u.created_at,
+
+            p.id,
+            p.title,
+            p.description,
+            p.city,
+            p.district,
+            p.price,
+            p.rooms,
+            p.area,
+            p.photo_url,
+            p.is_active,
+            p.created_at
+        FROM viewing_requests vr
+        INNER JOIN users u
+            ON u.id = vr.user_id
+        INNER JOIN properties p
+            ON p.id = vr.property_id
+        WHERE vr.id = $1
+        "#,
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await
+    .context("Не удалось получить заявку")
+}
+
+pub async fn count_users(pool: &PgPool) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Не удалось получить количество пользователей")
+}
+
+pub async fn count_properties(pool: &PgPool) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM properties",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Не удалось получить количество объектов")
+}
+
+pub async fn count_active_properties(pool: &PgPool) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM properties WHERE is_active = TRUE",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Не удалось получить количество активных объектов")
+}
+
+pub async fn count_requests(pool: &PgPool) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM viewing_requests",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Не удалось получить количество заявок")
+}
+
+pub async fn count_requests_by_status(
+    pool: &PgPool,
+    status: RequestStatus,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM viewing_requests
+        WHERE status = $1
+        "#,
+    )
+    .bind(status.to_string())
+    .fetch_one(pool)
+    .await
+    .context("Не удалось получить статистику заявок")
+}
+
+pub async fn latest_request_date(
+    pool: &PgPool,
+) -> Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT MAX(created_at) FROM viewing_requests",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Не удалось получить дату последней заявки")
+}
+
+pub async fn favorite_exists(
+    pool: &PgPool,
+    user_id: Uuid,
+    property_id: Uuid,
+) -> Result<Option<Favorite>> {
+    sqlx::query_as::<_, Favorite>(
+        r#"
+        SELECT
+            id,
+            user_id,
+            property_id,
+            created_at
+        FROM favorites
+        WHERE user_id = $1 AND property_id = $2
+        "#,
+    )
+    .bind(user_id)
+    .bind(property_id)
+    .fetch_optional(pool)
+    .await
+    .context("Не удалось получить избранное")
 }
